@@ -7,5 +7,7 @@ edition = "2021"
 
 [dependencies]
 bevy = { version = "0.12.1", default-features = true, features=["dynamic_linking"]}
-bevy_editor_pls = "0.7.0" #XXX point out fucked _ vs - issue
+bevy_editor_pls = "0.7.0" #XXX point out fucked _ vs - issue"
+bevy_rapier3d = "*"
+
 smart-default = "0.7.1"

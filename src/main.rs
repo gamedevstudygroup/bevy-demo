@@ -1,15 +1,26 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
-use bevy::{input::mouse::MouseWheel, prelude::*};
-use bevy_editor_pls::{egui::MouseWheelUnit, prelude::*};
+use std::f32::consts::FRAC_PI_2;
+
+use bevy::{
+    ecs::bundle::DynamicBundle, input::mouse::MouseWheel, prelude::*, reflect::DynamicTuple,
+};
+use bevy_editor_pls::prelude::*;
+use bevy_rapier3d::prelude::*;
 use smart_default::SmartDefault;
+
+mod transform_mesh;
+use transform_mesh::Bake;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(EditorPlugin::default())
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_systems(Startup, setup)
         .add_systems(Update, keyboard_input_system)
         .add_systems(Update, change_speed_system)
+        .add_systems(Update, jump_input_system)
+        .add_systems(Update, make_cube_system)
         .init_resource::<Speed>()
         .register_type::<Speed>()
         .run();
@@ -22,22 +33,40 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // circular base
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(shape::Circle::new(4.0).into()),
-        material: materials.add(Color::WHITE.into()),
-        transform: Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-        ..default()
-    });
-    // cube
-    commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-            material: materials.add(Color::rgb_u8(124, 144, 255).into()),
-            transform: Transform::from_xyz(0.0, 0.5, 0.0),
+    commands
+        .spawn(PbrBundle {
+            mesh: meshes.add(
+                Mesh::from(shape::Circle::new(4.0))
+                    .bake(Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2))),
+            ),
+            material: materials.add(Color::WHITE.into()),
+            /*transform: Transform::from_rotation(Quat::from_rotation_x(
+                std::f32::consts::FRAC_PI_2,
+            )),*/
             ..default()
-        },
-        Player,
-    ));
+        })
+        .insert(Collider::cuboid(4.0, 0.01, 4.0));
+
+    // cube
+    commands
+        .spawn((
+            PbrBundle {
+                mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
+                material: materials.add(Color::rgb_u8(124, 144, 255).into()),
+                transform: Transform::from_xyz(0.0, 2.0, 0.0),
+                ..default()
+            },
+            Player,
+        ))
+        .insert((
+            RigidBody::Dynamic,
+            Velocity::default(),
+            Collider::ball(0.5),
+            ActiveEvents::COLLISION_EVENTS,
+            CollidingEntities::default(),
+            LockedAxes::ROTATION_LOCKED,
+        ));
+
     // light
     commands.spawn(PointLightBundle {
         point_light: PointLight {
@@ -58,6 +87,13 @@ fn setup(
         },
         Pov,
     ));
+
+    commands.insert_resource(DefaultCube(PbrBundle {
+        mesh: meshes.add(Mesh::from(shape::Cube { size: 0.5 })),
+        material: materials.add(Color::rgb_u8(124, 255, 144).into()),
+        transform: Transform::from_xyz(0.0, 2.5, 0.0),
+        ..default()
+    }));
 }
 
 // Define a "Component" Player used to tag the object that should move.
@@ -67,7 +103,7 @@ struct Player;
 #[derive(Resource, SmartDefault, Reflect)]
 #[reflect(Resource)]
 //https://docs.rs/bevy/latest/bevy/reflect/derive.Reflect.html
-struct Speed(#[default = 0.5] f32);
+struct Speed(#[default = 2.0] f32);
 
 #[derive(Component)]
 struct Pov;
@@ -86,12 +122,39 @@ fn change_speed_system(mut speed: ResMut<Speed>, mut input: EventReader<MouseWhe
     }
 }
 
+fn jump_input_system(
+    input: Res<Input<KeyCode>>,
+    mut entities: Query<(&mut Velocity, &Transform), With<Player>>,
+) {
+    if input.just_pressed(KeyCode::Space) {
+        for (mut v, p) in entities.iter_mut() {
+            //TODO when to set v to override rapier.
+            v.linvel.y = 5f32;
+        }
+    }
+}
+
+// TODO can I localize resource to the system?
+#[derive(Resource)]
+struct DefaultCube(PbrBundle);
+
+fn make_cube_system(input: Res<Input<KeyCode>>, mut commands: Commands, cube: Res<DefaultCube>) {
+    if input.just_pressed(KeyCode::Return) {
+        commands.spawn((
+            cube.0.clone(),
+            RigidBody::Dynamic,
+            Collider::ball(0.25),
+            //ColliderMassProperties::Density(4.0),
+        ));
+    }
+}
+
 // Lets move the cube with the keyboard
 fn keyboard_input_system(
     input: Res<Input<KeyCode>>,
     time: Res<Time>,
     speed: Res<Speed>,
-    mut entities: Query<&mut Transform, With<Player>>,
+    mut entities: Query<(&mut Velocity, &Transform, &CollidingEntities), With<Player>>,
     camera: Query<&Transform, (With<Pov>, Without<Player>)>,
 ) {
     let up = input.pressed(KeyCode::W);
@@ -107,6 +170,7 @@ fn keyboard_input_system(
         y: vv as f32,
         z: 0f32,
     };
+    d = d.normalize_or_zero();
 
     // rotate d by angle of the camera
     d = camera.single().rotation.mul_vec3(d);
@@ -116,9 +180,13 @@ fn keyboard_input_system(
 
     // lock to unit circle and scale for speed and timestep
     d = d.normalize_or_zero();
-    d *= time.delta_seconds() * speed.0;
+    d *= speed.0;
 
-    for mut e in entities.iter_mut() {
-        e.translation += d;
+    for (mut v, _p, c) in entities.iter_mut() {
+        //TODO, how to get more info about collisions
+        if !c.is_empty() {
+            v.linvel.z = d.z;
+            v.linvel.x = d.x;
+        }
     }
 }
